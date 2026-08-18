@@ -798,6 +798,19 @@ func roleAllowed(role string, roles ...string) bool {
 	return false
 }
 
+// actorHasWorkspaceRole reports whether the CALLER holds one of the given
+// workspace roles. A machine credential (mat_ task token, mcn_ cloud-node
+// PAT) never does: middleware/auth.go stamps it with the OWNING human's
+// user id, so member.Role is the owner's role and not the caller's.
+// Every isAdmin / canManage term derived from member.Role must route
+// through this, not through roleAllowed directly.
+func actorHasWorkspaceRole(r *http.Request, role string, allowed ...string) bool {
+	if isMachineCredentialActor(r) {
+		return false
+	}
+	return roleAllowed(role, allowed...)
+}
+
 func countOwners(members []db.Member) int {
 	owners := 0
 	for _, member := range members {
