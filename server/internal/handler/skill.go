@@ -2446,7 +2446,7 @@ func (h *Handler) SetAgentSkills(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.canManageAgent(w, r, agent) {
+	if !h.canManageAgent(w, r, agent, agentDefinitionScopeSkills) {
 		return
 	}
 
@@ -2501,7 +2501,7 @@ func (h *Handler) AddAgentSkills(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.canManageAgent(w, r, agent) {
+	if !h.canManageAgent(w, r, agent, agentDefinitionScopeSkills) {
 		return
 	}
 
@@ -2550,7 +2550,7 @@ func (h *Handler) SetAgentSkillEnabled(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.canManageAgent(w, r, agent) {
+	if !h.canManageAgent(w, r, agent, agentDefinitionScopeSkills) {
 		return
 	}
 
@@ -2588,7 +2588,7 @@ func (h *Handler) RemoveAgentSkill(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.canManageAgent(w, r, agent) {
+	if !h.canManageAgent(w, r, agent, agentDefinitionScopeSkills) {
 		return
 	}
 	skillID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "skillId"), "skill_id")
