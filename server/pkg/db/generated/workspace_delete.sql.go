@@ -339,6 +339,10 @@ deleted_agent_invocation_targets AS (
     DELETE FROM agent_invocation_target
     WHERE agent_id IN (SELECT id FROM ws_agents)
 ),
+deleted_agent_definition_writers AS (
+    DELETE FROM agent_definition_writer
+    WHERE workspace_id = $1
+),
 deleted_agent_skills AS (
     DELETE FROM agent_skill
     WHERE agent_id IN (SELECT id FROM ws_agents)
@@ -450,6 +454,10 @@ WHERE channel_media_pending_object.workspace_id = $1
 // Same no-FK chore as chat_draft_restore above. Matched on workspace_id rather
 // than the session set because that column exists precisely so this statement
 // does not have to join through chat_session, which it deletes in this same CTE.
+// Jartan fork (SEC-2026-0069): the agent-definition writer allow-list is
+// workspace-owned, so it goes with the workspace. Keyed on workspace_id
+// directly rather than through ws_agents — a row naming an already-deleted
+// agent would otherwise survive its workspace.
 // Keep the two-system cleanup ledger until object storage has been settled.
 // Moving every row out of pending also prevents a concurrent media bind from
 // attaching an object after the workspace teardown commits. The reconciler

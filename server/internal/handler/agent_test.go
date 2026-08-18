@@ -1385,6 +1385,14 @@ func TestUpdateAgent_RedactsMcpConfigForAgentActor(t *testing.T) {
 	// workspace so resolveActor recognises X-Agent-ID as valid.
 	caller := createHandlerTestAgent(t, "mut-mcp-caller", nil)
 	taskID := insertHandlerTestTask(t, caller)
+	// Jartan fork (SEC-2026-0069): an agent actor is now refused on this
+	// endpoint unless the workspace owner allow-listed it, so allow-list the
+	// caller here. What this test is FOR is unchanged and still worth having —
+	// a privileged agent actor must not scrape another agent's mcp_config out
+	// of a mutation response — but its premise, that any agent seat reaches
+	// this handler at all, is exactly the hole the gate closed. Post-gate, the
+	// leg it guards is the allow-listed seat.
+	allowListAgent(t, caller)
 
 	desc := "trivial mutation that should NOT leak target mcp_config"
 	req := newRequest(http.MethodPut, "/api/agents/"+target, map[string]any{

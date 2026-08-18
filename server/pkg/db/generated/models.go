@@ -61,6 +61,15 @@ type AgentBuilderDraft struct {
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
+// Allow-list of agents permitted to mutate agent definitions in a workspace (Jartan fork, SEC-2026-0069). One row per (workspace, agent). Empty = fail closed: no agent principal may mutate any agent definition, only human members. Writable only by a human workspace owner; a listed agent gets the behaviour-config subset only (never permission_mode / visibility / invocation_targets / env). The UNIQUE (workspace_id, agent_id) index is also the lookup index — workspace_id leads, so both the per-workspace list and the per-agent membership check use it. No DB foreign keys: relationships are maintained in the application layer (see migration comment).
+type AgentDefinitionWriter struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	AgentID     pgtype.UUID        `json:"agent_id"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 // Allow-list of who may invoke a public_to agent (MUL-3963). One row per (agent, target_type, target); targets stack and canInvokeAgent OR-matches. workspace rows store the agent workspace_id in target_id; member rows store the user id; team rows are reserved and inert in V1. Rows only matter when agent.permission_mode = public_to. No DB foreign keys: agent_id / created_by / member target_id relationships are maintained in the application layer (see migration comment).
 type AgentInvocationTarget struct {
 	ID         pgtype.UUID        `json:"id"`
