@@ -203,6 +203,10 @@ func (h *Handler) SetAgentRuntimeSkillEnabled(w http.ResponseWriter, r *http.Req
 			append(logger.RequestAttrs(r), "error", err, "agent_id", agentID)...)
 	}
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(locked.WorkspaceID))
+	// A runtime-skill override changes what the agent is taught, so it is an
+	// agent-definition write: audit it when an allow-listed agent made it
+	// (Jartan fork).
+	h.auditAgentDefinitionWrite(r, agentDefinitionActor{actorType: actorType, agentID: actorID}, locked.WorkspaceID, locked, "runtime_skill")
 	h.publish(protocol.EventAgentStatus, uuidToString(locked.WorkspaceID), actorType, actorID,
 		map[string]any{"agent": broadcastAgentResponse(resp)})
 

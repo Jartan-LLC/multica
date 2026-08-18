@@ -1797,6 +1797,22 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				})
 			})
 
+			// Agent-definition writer allow-list (Jartan fork).
+			// Additive routes: nothing here changes an existing request or
+			// response shape, so an unmodified upstream CLI is unaffected.
+			// Read is workspace-member; the write is human-workspace-owner-only
+			// — RequireHumanActor rejects machine credentials (mat_ task tokens,
+			// mcn_ cloud PATs) and the handler re-checks owner role and machine
+			// actor as a backstop. If a listed agent could edit this list, the
+			// gate it feeds would be circular.
+			r.Route("/api/agent-definition-writers", func(r chi.Router) {
+				r.Get("/", h.ListAgentDefinitionWriters)
+				r.Group(func(r chi.Router) {
+					r.Use(handler.RequireHumanActor)
+					r.Put("/", h.SetAgentDefinitionWriters)
+				})
+			})
+
 			r.Route("/api/agent-builder/sessions", func(r chi.Router) {
 				// The creation studio's unfinished drafts. Builder sessions are
 				// invisible to every chat list (their carrier is kind='system'),
