@@ -163,7 +163,7 @@ func (h *Handler) RevokeLarkInstallation(w http.ResponseWriter, r *http.Request)
 		if _, ok := h.requireWorkspaceRole(w, r, uuidToString(wsUUID), "lark installation not found", "owner", "admin"); !ok {
 			return
 		}
-	} else if !h.canManageAgent(w, r, agent) {
+	} else if !h.canManageAgent(w, r, agent, agentDefinitionScopeClosed) {
 		return
 	}
 	if err := h.LarkInstallations.Revoke(r.Context(), instUUID); err != nil {
@@ -332,7 +332,7 @@ func (h *Handler) BeginLarkInstall(w http.ResponseWriter, r *http.Request) {
 	// workspace owner/admin may bind. canManageAgent writes the 403/404
 	// itself, so a member who is neither is stopped here rather than at
 	// the (now member-level) router.
-	if !h.canManageAgent(w, r, agent) {
+	if !h.canManageAgent(w, r, agent, agentDefinitionScopeClosed) {
 		return
 	}
 	initiatorUUID, ok := parseUUIDOrBadRequest(w, userID, "user id")

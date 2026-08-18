@@ -1090,7 +1090,7 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	// route of its own. Closing create closes copy. An allow-listed seat may
 	// create; that is hiring, which is the People Ops authority the allow-list
 	// exists to preserve.
-	definitionActor, ok := h.authorizeAgentDefinitionWrite(w, r, workspaceID)
+	definitionActor, ok := h.authorizeAgentDefinitionWrite(w, r, workspaceID, "", agentDefinitionScopeCreate)
 	if !ok {
 		return
 	}
@@ -1102,28 +1102,21 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// An allow-listed agent may not mint a seat carrying anything it could not
-	// set on an existing seat. Without this, create is the field-check bypass:
-	// permission_mode / invocation_targets / visibility are owner-only on
-	// update, and custom_env is denied to every agent on its own endpoint, so
-	// accepting either here would hand back through create what the gate just
-	// refused. Rejected rather than silently dropped, so a caller never
-	// believes it created a public agent that is in fact private.
+	// Field scope for an allow-listed agent principal on create (Jartan fork,
+	// §2/§3/§4). Two different rules, and the difference is the point:
+	//
+	//   - the trust axis (permission_mode / visibility / invocation_targets) is
+	//     IGNORED, not refused. The server sets it below. Refusing it would
+	//     break every create made with a CLI that serialises a defaulted
+	//     --visibility, which is the CLI/server skew this fork exists to avoid.
+	//   - every other field outside the create scope — custom_env, mcp_config,
+	//     runtime_config, custom_args, service_tier, max_concurrent_tasks,
+	//     avatar_url, composio_toolkit_allowlist — is refused loudly, so a
+	//     caller is never told it configured something it did not. Without
+	//     this, create is the field-check bypass: mint the seat carrying what
+	//     update would refuse.
 	if definitionActor.isAgent() {
-		if _, hasPermissionMode := rawFields["permission_mode"]; hasPermissionMode {
-			writeError(w, http.StatusForbidden, "agents may not set permission_mode; the workspace owner sets agent access")
-			return
-		}
-		if _, hasInvocationTargets := rawFields["invocation_targets"]; hasInvocationTargets {
-			writeError(w, http.StatusForbidden, "agents may not set invocation_targets; the workspace owner sets agent access")
-			return
-		}
-		if req.Visibility != "" && req.Visibility != "private" {
-			writeError(w, http.StatusForbidden, "agents may only create private agents; the workspace owner widens access")
-			return
-		}
-		if len(req.CustomEnv) > 0 {
-			writeError(w, http.StatusForbidden, "agents may not set custom_env; env is managed by the agent owner or a workspace owner/admin")
+		if !denyRestrictedAgentDefinitionFields(w, rawFields, agentDefinitionCreateFields, true) {
 			return
 		}
 	}
@@ -1168,10 +1161,21 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	// accepted unconditionally.
 	_, hasTargets := rawFields["invocation_targets"]
 	legacyVis := req.Visibility
-	perm, _, permErr := parsePermissionInput(wsUUID, req.PermissionMode, req.InvocationTargets, req.PermissionMode != nil, hasTargets, &legacyVis)
-	if permErr != nil {
-		writeError(w, http.StatusBadRequest, permErr.Error())
-		return
+	var perm resolvedPermission
+	if definitionActor.isAgent() {
+		// Jartan fork (§4): the server sets the trust axis for a seat
+		// created by an agent principal — public_to, workspace as the sole
+		// invocation target — whatever the caller sent. The agent never writes
+		// this axis, and does not need to: this is the only shape the roster
+		// has ever had, and it is what makes a new hire assignable.
+		perm = agentCreatedSeatPermission(wsUUID)
+	} else {
+		var permErr error
+		perm, _, permErr = parsePermissionInput(wsUUID, req.PermissionMode, req.InvocationTargets, req.PermissionMode != nil, hasTargets, &legacyVis)
+		if permErr != nil {
+			writeError(w, http.StatusBadRequest, permErr.Error())
+			return
+		}
 	}
 	runtime, err := h.Queries.GetAgentRuntimeForWorkspace(r.Context(), db.GetAgentRuntimeForWorkspaceParams{
 		ID:          runtimeUUID,
@@ -1585,7 +1589,7 @@ func redactAgentResponseForActor(resp *AgentResponse, actorType string) {
 // canManageAgent checks whether the current user can update or archive an agent.
 // Only the agent owner or workspace owner/admin can manage any agent,
 // regardless of whether it is public or private.
-func (h *Handler) canManageAgent(w http.ResponseWriter, r *http.Request, agent db.Agent) bool {
+func (h *Handler) canManageAgent(w http.ResponseWriter, r *http.Request, agent db.Agent, scope agentDefinitionScope) bool {
 	wsID := uuidToString(agent.WorkspaceID)
 	// Agent-definition write gate (Jartan fork). Deliberately
 	// placed HERE rather than in each handler: every "manage the agent record"
@@ -1594,9 +1598,12 @@ func (h *Handler) canManageAgent(w http.ResponseWriter, r *http.Request, agent d
 	// label attach/detach and the Lark agent bindings — so one call gates the
 	// whole surface, and a mutation route added upstream inherits the gate on
 	// rebase instead of silently opening a hole. Humans are unaffected; an
-	// agent principal passes only if the workspace owner allow-listed it.
+	// agent principal passes only if the workspace owner allow-listed it, the
+	// record is not its own, and the route is inside the scope it was given.
+	// The scope argument is why a new upstream route cannot inherit the gate
+	// OPEN: it must be given one, and the zero value is closed.
 	// See internal/handler/agent_definition_gate.go.
-	if _, ok := h.authorizeAgentDefinitionWrite(w, r, wsID); !ok {
+	if _, ok := h.authorizeAgentDefinitionWrite(w, r, wsID, uuidToString(agent.ID), scope); !ok {
 		return false
 	}
 	member, ok := h.requireWorkspaceRole(w, r, wsID, "agent not found", "owner", "admin", "member")
@@ -1618,7 +1625,7 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.canManageAgent(w, r, existing) {
+	if !h.canManageAgent(w, r, existing, agentDefinitionScopeUpdate) {
 		return
 	}
 
@@ -1627,6 +1634,17 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	// Field scope for an allow-listed agent principal (Jartan fork, §2/§3):
+	// instructions, model, thinking_level, name, description — and
+	// nothing else on this endpoint. Checked before any validation or write so
+	// a refused field never half-applies, and so the caller is told which field
+	// it was. Non-listed agents never reach here; humans are unaffected.
+	if h.agentDefinitionActorOf(r, uuidToString(existing.WorkspaceID)).isAgent() {
+		if !denyRestrictedAgentDefinitionFields(w, rawFields, agentDefinitionUpdateFields, false) {
+			return
+		}
 	}
 
 	// Hard-reject any attempt to write custom_env through the generic
@@ -1735,17 +1753,12 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	replacePermissionTargets := false
 	var resolvedPerm resolvedPermission
 	if permissionTouched {
-		// Jartan fork: an agent principal is NEVER the owner
-		// for this decision, however the row reads. A mat_ task token stamps
-		// X-User-ID to the agent's OWNING human, so the raw comparison below
-		// would hand an allow-listed People Ops seat the ability to re-trust or
-		// re-target any agent — the one axis Thorne's model keeps owner-only,
-		// because rewriting it converts one injected seat into control of who
-		// may invoke every other seat. Falling through as a non-owner reuses
-		// upstream's own semantics unchanged: a real change is 403, a no-op
-		// resubmit from a PATCH-as-PUT client is still tolerated.
-		isAgentOwner := !h.agentDefinitionActorOf(r, uuidToString(existing.WorkspaceID)).isAgent() &&
-			uuidToString(existing.OwnerID) == requestUserID(r)
+		// Jartan fork: an agent principal never reaches this
+		// branch — the field-scope check above refuses permission_mode /
+		// visibility / invocation_targets outright (§4, "on update: 403, fail
+		// loud"). Upstream's owner comparison is left exactly as it is, which
+		// keeps this hot path free of fork diff.
+		isAgentOwner := uuidToString(existing.OwnerID) == requestUserID(r)
 		if !isAgentOwner {
 			changed, permErr := h.permissionInputChangesAgent(r.Context(), existing, req, hasPermissionMode, hasTargets)
 			if permErr != nil {
@@ -2225,7 +2238,7 @@ func (h *Handler) ArchiveAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.canManageAgent(w, r, agent) {
+	if !h.canManageAgent(w, r, agent, agentDefinitionScopeLifecycle) {
 		return
 	}
 	if agent.ArchivedAt.Valid {
@@ -2285,7 +2298,7 @@ func (h *Handler) RestoreAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.canManageAgent(w, r, agent) {
+	if !h.canManageAgent(w, r, agent, agentDefinitionScopeLifecycle) {
 		return
 	}
 	if !agent.ArchivedAt.Valid {
@@ -2338,7 +2351,10 @@ func (h *Handler) CancelAgentTasks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.canManageAgent(w, r, agent) {
+	// Closed to agent principals (Jartan fork, §2): cancelling another
+	// agent's running tasks is not one of the permitted operations, it has no
+	// CLI surface, and no People Ops workflow exercises it.
+	if !h.canManageAgent(w, r, agent, agentDefinitionScopeClosed) {
 		return
 	}
 

@@ -86,7 +86,10 @@ func (h *Handler) SetAgentRuntimeSkillEnabled(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	if !h.canManageAgent(w, r, agent) {
+	// Closed to agent principals (Jartan fork, §2): a runtime-skill
+	// override is not one of the permitted operations. It costs nothing on the
+	// live record — disabled_runtime_skills is empty on 30 of 30 seats.
+	if !h.canManageAgent(w, r, agent, agentDefinitionScopeClosed) {
 		return
 	}
 
