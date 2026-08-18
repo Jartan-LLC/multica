@@ -2067,7 +2067,20 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// resolve their initiator from the triggering comment's author below; the
 	// two paths are mutually exclusive (a task is either chat or issue-bound).
 	// See MUL-2645.
-	if task.InitiatorUserID.Valid {
+	//
+	// Jartan fork: an agent-sent chat message records the
+	// SENDING AGENT on the row (migration 902) and leaves initiator_user_id
+	// NULL. Render it through the agent branch BuildTaskInitiatorBlock already
+	// has — "initiated by X, another agent in this workspace" — instead of
+	// telling the recipient a member sent it. Checked first because it is the
+	// more specific fact; the member branch is unchanged for every other path.
+	if task.InitiatorAgentID.Valid {
+		resp.InitiatorType = "agent"
+		resp.InitiatorID = uuidToString(task.InitiatorAgentID)
+		if a, err := h.Queries.GetAgent(r.Context(), task.InitiatorAgentID); err == nil {
+			resp.InitiatorName = a.Name
+		}
+	} else if task.InitiatorUserID.Valid {
 		resp.InitiatorType = "member"
 		resp.InitiatorID = uuidToString(task.InitiatorUserID)
 		if u, err := h.Queries.GetUser(r.Context(), task.InitiatorUserID); err == nil {

@@ -131,6 +131,11 @@ func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 		CreatorID:   parseUUID(userID),
 		Title:       req.Title,
 		ProjectID:   projectID,
+		// Jartan fork: record WHICH principal created this
+		// session. creator_id alone cannot say — a task token stamps it with
+		// the agent's owning human. The value comes from the actor resolved
+		// above for the invoke gate, i.e. from the request's own task token.
+		CreatorAgentID: newChatActorScope(actorType, actorID).creatorAgentID(),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create chat session")
@@ -168,6 +173,10 @@ func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve agent access")
 		return
 	}
+	// Jartan fork: the creator_id predicate in the queries below
+	// is a no-op between principals that share a user id, which every agent run
+	// in this workspace does. Drop the rows this principal may not reach.
+	scope := newChatActorScope(actorType, actorID)
 
 	status := r.URL.Query().Get("status")
 
@@ -188,34 +197,7 @@ func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 			if _, ok := allowed[uuidToString(s.AgentID)]; !ok {
 				continue
 			}
-			resp = append(resp, ChatSessionResponse{
-				ID:          uuidToString(s.ID),
-				WorkspaceID: uuidToString(s.WorkspaceID),
-				AgentID:     uuidToString(s.AgentID),
-				CreatorID:   uuidToString(s.CreatorID),
-				ProjectID:   uuidToPtr(s.ProjectID),
-				Title:       s.Title,
-				Status:      s.Status,
-				HasUnread:   s.UnreadCount > 0,
-				UnreadCount: int(s.UnreadCount),
-				LastMessage: buildChatLastMessage(s.LastMessageAt, s.LastMessageContent, s.LastMessageRole, s.LastMessageFailureReason, s.LastMessageKind),
-				Pinned:      s.PinnedAt.Valid,
-				CreatedAt:   timestampToString(s.CreatedAt),
-				UpdatedAt:   timestampToString(s.UpdatedAt),
-			})
-		}
-	} else {
-		rows, err := h.Queries.ListChatSessionsByCreator(r.Context(), db.ListChatSessionsByCreatorParams{
-			WorkspaceID: parseUUID(workspaceID),
-			CreatorID:   parseUUID(userID),
-		})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to list chat sessions")
-			return
-		}
-		resp = make([]ChatSessionResponse, 0, len(rows))
-		for _, s := range rows {
-			if _, ok := allowed[uuidToString(s.AgentID)]; !ok {
+			if !scope.allows(s.AgentID, s.CreatorAgentID) {
 				continue
 			}
 			resp = append(resp, ChatSessionResponse{
@@ -232,6 +214,43 @@ func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 				Pinned:      s.PinnedAt.Valid,
 				CreatedAt:   timestampToString(s.CreatedAt),
 				UpdatedAt:   timestampToString(s.UpdatedAt),
+
+				CreatorAgentID: uuidToString(s.CreatorAgentID),
+			})
+		}
+	} else {
+		rows, err := h.Queries.ListChatSessionsByCreator(r.Context(), db.ListChatSessionsByCreatorParams{
+			WorkspaceID: parseUUID(workspaceID),
+			CreatorID:   parseUUID(userID),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list chat sessions")
+			return
+		}
+		resp = make([]ChatSessionResponse, 0, len(rows))
+		for _, s := range rows {
+			if _, ok := allowed[uuidToString(s.AgentID)]; !ok {
+				continue
+			}
+			if !scope.allows(s.AgentID, s.CreatorAgentID) {
+				continue
+			}
+			resp = append(resp, ChatSessionResponse{
+				ID:          uuidToString(s.ID),
+				WorkspaceID: uuidToString(s.WorkspaceID),
+				AgentID:     uuidToString(s.AgentID),
+				CreatorID:   uuidToString(s.CreatorID),
+				ProjectID:   uuidToPtr(s.ProjectID),
+				Title:       s.Title,
+				Status:      s.Status,
+				HasUnread:   s.UnreadCount > 0,
+				UnreadCount: int(s.UnreadCount),
+				LastMessage: buildChatLastMessage(s.LastMessageAt, s.LastMessageContent, s.LastMessageRole, s.LastMessageFailureReason, s.LastMessageKind),
+				Pinned:      s.PinnedAt.Valid,
+				CreatedAt:   timestampToString(s.CreatedAt),
+				UpdatedAt:   timestampToString(s.UpdatedAt),
+
+				CreatorAgentID: uuidToString(s.CreatorAgentID),
 			})
 		}
 	}
@@ -257,6 +276,16 @@ func (h *Handler) loadChatSessionForUser(w http.ResponseWriter, r *http.Request,
 	}
 	if uuidToString(session.CreatorID) != userID {
 		writeError(w, http.StatusForbidden, "not your chat session")
+		return db.ChatSession{}, false
+	}
+	// Jartan fork: the creator check above separates nobody
+	// from anybody when the caller is an agent run — its task token carries the
+	// owning human's user id, which is every other seat's user id too. Scope by
+	// principal as well. This is the single choke point every per-session chat
+	// handler funnels through (including the agent-builder and file-upload
+	// paths), so a handler added upstream inherits the rule.
+	if scope := h.chatActorScopeFor(r, userID, workspaceID); !scope.allowsSession(session) {
+		denyChatSessionForActor(w, scope, session)
 		return db.ChatSession{}, false
 	}
 	return session, true
@@ -903,7 +932,12 @@ func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 	// creator-only), so they are the task initiator — surfaced to the agent
 	// under `## Task Initiator`. actorType/actorID were resolved above for the
 	// invoke gate.
-	sent, err := h.TaskService.SendDirectChatMessage(r.Context(), session, agent, parseUUID(userID), req.Content, attachmentIDs, actorType, parseUUID(actorID))
+	//
+	// Jartan fork: the sending run's task id rides along, so an
+	// agent send is recorded as that agent's, not as the token owner's. Read
+	// from X-Task-ID, which the auth middleware forces from the token row —
+	// caller-supplied values are overwritten there, so this is server-verified.
+	sent, err := h.TaskService.SendDirectChatMessage(r.Context(), session, agent, parseUUID(userID), req.Content, attachmentIDs, actorType, parseUUID(actorID), optionalUUID(r.Header.Get("X-Task-ID")))
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrChatSessionArchived):
@@ -1479,6 +1513,10 @@ func (h *Handler) ListPendingChatTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list pending chat tasks")
 		return
 	}
+	// Jartan fork: same principal scope as ListChatSessions —
+	// without it this endpoint hands an agent run the session ids of every
+	// in-flight chat in the workspace, the owner's included.
+	scope := newChatActorScope(actorType, actorID)
 
 	// The pending query now returns cs.agent_id per row, so we can filter
 	// out private agents the caller has lost access to directly against the
@@ -1488,6 +1526,9 @@ func (h *Handler) ListPendingChatTasks(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		agentID := uuidToString(row.AgentID)
 		if _, ok := allowed[agentID]; !ok {
+			continue
+		}
+		if !scope.allows(row.AgentID, row.CreatorAgentID) {
 			continue
 		}
 		items = append(items, PendingChatTaskItem{
@@ -1537,6 +1578,34 @@ func (h *Handler) HasPendingChatTasks(w http.ResponseWriter, r *http.Request) {
 	// No accessible agents → nothing the caller may see can be pending.
 	// Skip the round-trip and return false.
 	if len(allowed) == 0 {
+		writeJSON(w, http.StatusOK, HasPendingChatTasksResponse{HasPending: false})
+		return
+	}
+
+	// Jartan fork: HasPendingChatTasksByCreator is an EXISTS
+	// over creator_id, which cannot express "reachable by THIS agent principal"
+	// without changing an upstream query's shape. An agent principal is a
+	// machine caller with no FAB to light, so it answers off the list query with
+	// the same per-row filter instead; members keep the EXISTS fast path.
+	if scope := newChatActorScope(actorType, actorID); scope.isAgent {
+		rows, err := h.Queries.ListPendingChatTasksByCreator(r.Context(), db.ListPendingChatTasksByCreatorParams{
+			WorkspaceID: parseUUID(workspaceID),
+			CreatorID:   parseUUID(userID),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to check pending chat tasks")
+			return
+		}
+		for _, row := range rows {
+			if _, ok := allowed[uuidToString(row.AgentID)]; !ok {
+				continue
+			}
+			if !scope.allows(row.AgentID, row.CreatorAgentID) {
+				continue
+			}
+			writeJSON(w, http.StatusOK, HasPendingChatTasksResponse{HasPending: true})
+			return
+		}
 		writeJSON(w, http.StatusOK, HasPendingChatTasksResponse{HasPending: false})
 		return
 	}
@@ -1877,6 +1946,10 @@ type ChatSessionResponse struct {
 	Pinned    bool   `json:"pinned"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
+	// CreatorAgentID names the agent whose run created this session, empty when
+	// a human created it (Jartan fork). Additive: an upstream
+	// client that does not know the field ignores it.
+	CreatorAgentID string `json:"creator_agent_id,omitempty"`
 }
 
 // ChatLastMessage is a preview of a session's most recent message, used to
@@ -1946,6 +2019,8 @@ func chatSessionToResponse(s db.ChatSession) ChatSessionResponse {
 		Pinned:      s.PinnedAt.Valid,
 		CreatedAt:   timestampToString(s.CreatedAt),
 		UpdatedAt:   timestampToString(s.UpdatedAt),
+
+		CreatorAgentID: uuidToString(s.CreatorAgentID),
 	}
 }
 

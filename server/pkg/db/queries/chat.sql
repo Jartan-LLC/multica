@@ -1,6 +1,9 @@
 -- name: CreateChatSession :one
-INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro, project_id)
-VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5, sqlc.narg('project_id'))
+-- creator_agent_id records WHICH agent principal created the session, or NULL
+-- for a human creator (Jartan fork). The caller resolves it from
+-- the request's own task token, never from the request body.
+INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro, project_id, creator_agent_id)
+VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5, sqlc.narg('project_id'), sqlc.narg('creator_agent_id'))
 RETURNING *;
 
 -- name: ClearChatSessionProjectByProject :exec
@@ -168,6 +171,8 @@ SELECT cs.id,
        cs.title,
        cs.created_at,
        cs.updated_at,
+       cs.agent_id,
+       cs.creator_agent_id,
        a.runtime_id,
        COALESCE(lm.content, '') AS last_message_content,
        COALESCE(lm.role, '') AS last_message_role,
@@ -922,11 +927,17 @@ WHERE id = $1;
 -- The chat sender (initiator) is a direct_human originator and accountable;
 -- attribution provenance is stamped so this path is not a NULL-source enqueue
 -- bypass (MUL-4302 §2).
+-- Jartan fork: initiator_agent_id and delegated_from_task_id
+-- carry an AGENT sender. A chat send from a task token is not a direct_human
+-- run: the sending agent goes in initiator_agent_id (initiator_user_id stays
+-- NULL — no human sent it), and the send is attributed as a delegation off the
+-- sending task. Both values come from the mat_ token the auth middleware bound
+-- to the request, never from caller input. A member send is unchanged.
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, chat_session_id,
     initiator_user_id, originator_user_id, accountable_user_id, force_fresh_session, runtime_mcp_overlay,
     runtime_connected_apps, originator_source, trigger_evidence_kind, trigger_evidence_ref_id,
-    fire_at
+    fire_at, initiator_agent_id, delegated_from_task_id
 )
 SELECT
     $1, $2, NULL,
@@ -940,7 +951,9 @@ SELECT
     sqlc.narg(originator_source),
     sqlc.narg(trigger_evidence_kind),
     sqlc.narg(trigger_evidence_ref_id),
-    sqlc.narg('fire_at')::timestamptz
+    sqlc.narg('fire_at')::timestamptz,
+    sqlc.narg(initiator_agent_id),
+    sqlc.narg(delegated_from_task_id)
 WHERE lock_task_owner_rows($1, NULL, $2)
 RETURNING *;
 
@@ -1222,7 +1235,7 @@ FROM prioritized;
 -- atq.chat_session_id IS NOT NULL is redundant given the JOIN, but stated
 -- explicitly so the planner can prove the query predicate is a subset of the
 -- idx_agent_task_queue_chat_pending_v3 partial-index predicate and use it.
-SELECT atq.id AS task_id, atq.status, atq.chat_session_id, cs.agent_id
+SELECT atq.id AS task_id, atq.status, atq.chat_session_id, cs.agent_id, cs.creator_agent_id
 FROM agent_task_queue atq
 JOIN chat_session cs ON cs.id = atq.chat_session_id
 WHERE atq.chat_session_id IS NOT NULL
