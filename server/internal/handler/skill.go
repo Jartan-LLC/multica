@@ -2640,6 +2640,11 @@ func (h *Handler) writeUpdatedAgentSkills(w http.ResponseWriter, r *http.Request
 		resp[i].Enabled = &s.Enabled
 	}
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(agent.WorkspaceID))
+	// Skills are instruction text, so a skill write is an agent-definition
+	// write: audit it when an allow-listed agent made it (Jartan fork,
+	// SEC-2026-0069). All four skill mutations — set, add, per-skill enable,
+	// remove — return through here, so this is their single audit point.
+	h.auditAgentDefinitionWrite(r, agentDefinitionActor{actorType: actorType, agentID: actorID}, agent.WorkspaceID, agent, "skills")
 	h.publish(protocol.EventAgentStatus, uuidToString(agent.WorkspaceID), actorType, actorID, map[string]any{"agent_id": uuidToString(agent.ID), "skills": resp})
 	writeJSON(w, http.StatusOK, resp)
 }

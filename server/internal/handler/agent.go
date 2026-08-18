@@ -1082,11 +1082,50 @@ func decodeJSONBodyWithRawFields(body io.Reader, dst any) (map[string]json.RawMe
 func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	workspaceID := h.resolveWorkspaceID(r)
 
+	// Agent-definition write gate (Jartan fork, SEC-2026-0069). Create is the
+	// sidestep the gate would otherwise leave open: the creator becomes owner
+	// unconditionally, so an agent barred from rewriting an existing seat could
+	// mint a new one it owns outright — and `agent copy` is exactly this
+	// endpoint, since the CLI implements copy as GET + POST with no server
+	// route of its own. Closing create closes copy. An allow-listed seat may
+	// create; that is hiring, which is the People Ops authority the allow-list
+	// exists to preserve.
+	definitionActor, ok := h.authorizeAgentDefinitionWrite(w, r, workspaceID)
+	if !ok {
+		return
+	}
+
 	var req CreateAgentRequest
 	rawFields, err := decodeJSONBodyWithRawFields(r.Body, &req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	// An allow-listed agent may not mint a seat carrying anything it could not
+	// set on an existing seat. Without this, create is the field-check bypass:
+	// permission_mode / invocation_targets / visibility are owner-only on
+	// update, and custom_env is denied to every agent on its own endpoint, so
+	// accepting either here would hand back through create what the gate just
+	// refused. Rejected rather than silently dropped, so a caller never
+	// believes it created a public agent that is in fact private.
+	if definitionActor.isAgent() {
+		if _, hasPermissionMode := rawFields["permission_mode"]; hasPermissionMode {
+			writeError(w, http.StatusForbidden, "agents may not set permission_mode; the workspace owner sets agent access")
+			return
+		}
+		if _, hasInvocationTargets := rawFields["invocation_targets"]; hasInvocationTargets {
+			writeError(w, http.StatusForbidden, "agents may not set invocation_targets; the workspace owner sets agent access")
+			return
+		}
+		if req.Visibility != "" && req.Visibility != "private" {
+			writeError(w, http.StatusForbidden, "agents may only create private agents; the workspace owner widens access")
+			return
+		}
+		if len(req.CustomEnv) > 0 {
+			writeError(w, http.StatusForbidden, "agents may not set custom_env; env is managed by the agent owner or a workspace owner/admin")
+			return
+		}
 	}
 
 	ownerID, ok := requireUserID(w, r)
@@ -1302,6 +1341,7 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("agent created", append(logger.RequestAttrs(r), "agent_id", uuidToString(created.ID), "name", created.Name, "workspace_id", workspaceID)...)
+	h.auditAgentDefinitionWrite(r, definitionActor, created.WorkspaceID, created, "create")
 
 	if runtime.Status == "online" {
 		h.TaskService.ReconcileAgentStatus(r.Context(), created.ID)
@@ -1547,6 +1587,18 @@ func redactAgentResponseForActor(resp *AgentResponse, actorType string) {
 // regardless of whether it is public or private.
 func (h *Handler) canManageAgent(w http.ResponseWriter, r *http.Request, agent db.Agent) bool {
 	wsID := uuidToString(agent.WorkspaceID)
+	// Agent-definition write gate (Jartan fork, SEC-2026-0069). Deliberately
+	// placed HERE rather than in each handler: every "manage the agent record"
+	// route in the router funnels through this predicate — update, archive,
+	// restore, cancel-tasks, all four skill writes, runtime-skill overrides,
+	// label attach/detach and the Lark agent bindings — so one call gates the
+	// whole surface, and a mutation route added upstream inherits the gate on
+	// rebase instead of silently opening a hole. Humans are unaffected; an
+	// agent principal passes only if the workspace owner allow-listed it.
+	// See internal/handler/agent_definition_gate.go.
+	if _, ok := h.authorizeAgentDefinitionWrite(w, r, wsID); !ok {
+		return false
+	}
 	member, ok := h.requireWorkspaceRole(w, r, wsID, "agent not found", "owner", "admin", "member")
 	if !ok {
 		return false
@@ -1683,7 +1735,17 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	replacePermissionTargets := false
 	var resolvedPerm resolvedPermission
 	if permissionTouched {
-		isAgentOwner := uuidToString(existing.OwnerID) == requestUserID(r)
+		// Jartan fork (SEC-2026-0069): an agent principal is NEVER the owner
+		// for this decision, however the row reads. A mat_ task token stamps
+		// X-User-ID to the agent's OWNING human, so the raw comparison below
+		// would hand an allow-listed People Ops seat the ability to re-trust or
+		// re-target any agent — the one axis Thorne's model keeps owner-only,
+		// because rewriting it converts one injected seat into control of who
+		// may invoke every other seat. Falling through as a non-owner reuses
+		// upstream's own semantics unchanged: a real change is 403, a no-op
+		// resubmit from a PATCH-as-PUT client is still tolerated.
+		isAgentOwner := !h.agentDefinitionActorOf(r, uuidToString(existing.WorkspaceID)).isAgent() &&
+			uuidToString(existing.OwnerID) == requestUserID(r)
 		if !isAgentOwner {
 			changed, permErr := h.permissionInputChangesAgent(r.Context(), existing, req, hasPermissionMode, hasTargets)
 			if permErr != nil {
@@ -1968,6 +2030,7 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("agent updated", append(logger.RequestAttrs(r), "agent_id", id, "workspace_id", uuidToString(updated.WorkspaceID))...)
+	h.auditAgentDefinitionWrite(r, h.agentDefinitionActorOf(r, uuidToString(updated.WorkspaceID)), updated.WorkspaceID, updated, "update")
 	userID := requestUserID(r)
 	actorType, actorID := h.resolveActor(r, userID, uuidToString(updated.WorkspaceID))
 	h.publish(protocol.EventAgentStatus, uuidToString(updated.WorkspaceID), actorType, actorID, map[string]any{"agent": broadcastAgentResponse(resp)})
@@ -2203,6 +2266,7 @@ func (h *Handler) ArchiveAgent(w http.ResponseWriter, r *http.Request) {
 
 	wsID := uuidToString(archived.WorkspaceID)
 	slog.Info("agent archived", append(logger.RequestAttrs(r), "agent_id", id, "workspace_id", wsID)...)
+	h.auditAgentDefinitionWrite(r, h.agentDefinitionActorOf(r, wsID), archived.WorkspaceID, archived, "archive")
 	resp := h.agentToResponse(archived)
 	if err := h.attachAgentSkills(r.Context(), &resp, archived.ID); err != nil {
 		slog.Warn("load agent skills after archive failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
@@ -2238,6 +2302,7 @@ func (h *Handler) RestoreAgent(w http.ResponseWriter, r *http.Request) {
 
 	wsID := uuidToString(restored.WorkspaceID)
 	slog.Info("agent restored", append(logger.RequestAttrs(r), "agent_id", id, "workspace_id", wsID)...)
+	h.auditAgentDefinitionWrite(r, h.agentDefinitionActorOf(r, wsID), restored.WorkspaceID, restored, "restore")
 	resp := h.agentToResponse(restored)
 	if err := h.attachAgentSkills(r.Context(), &resp, restored.ID); err != nil {
 		slog.Warn("load agent skills after restore failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
