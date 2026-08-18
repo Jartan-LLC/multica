@@ -1895,6 +1895,11 @@ var ErrChatSessionAlreadyStarted = errors.New("chat session already has a user m
 // The caller must have already gated the session and preflighted the agent
 // (archived / no-runtime), passing the loaded agent in. Those checks are repeated
 // under the transaction locks below because either row may change before enqueue.
+//
+// Jartan fork (SEC-2026-0079): senderTaskID is the run that sent the message,
+// resolved by the handler from the request's own `mat_` task token. Together
+// with uploaderType == "agent" it is what tells this path the sender is an
+// agent rather than the token's owning human. Zero for a member send.
 func (s *TaskService) SendDirectChatMessage(
 	ctx context.Context,
 	session db.ChatSession,
@@ -1904,6 +1909,7 @@ func (s *TaskService) SendDirectChatMessage(
 	attachmentIDs []pgtype.UUID,
 	uploaderType string,
 	uploaderID pgtype.UUID,
+	senderTaskID pgtype.UUID,
 ) (*DirectChatSendResult, error) {
 	// Build the per-task Composio overlay before the transaction — it can do
 	// network I/O and must not run with a DB transaction open.
@@ -1914,12 +1920,30 @@ func (s *TaskService) SendDirectChatMessage(
 	// EnqueueChatTask writes. Without this the direct-chat path was a bypass: it set
 	// originator_user_id but left accountable_user_id / source / evidence NULL,
 	// violating the one-way invariant and dropping the audit source (MUL-4302 §2).
-	attr := attribution.DirectHumanRun(initiatorUserID, attribution.EvidenceChat, session.ID)
+	//
+	// Jartan fork (SEC-2026-0079): a send the server has already resolved as an
+	// agent is not a direct_human run and must not be stamped as one. The
+	// sending agent is recorded on the row, the human initiator column is left
+	// NULL (no human sent it), and attribution becomes a delegation off the
+	// sending task — the case the package already models, with the accountable
+	// human copied rather than chained. `initiatorAgentID` is server-verified:
+	// the auth middleware forces X-Agent-ID / X-Task-ID from the token row,
+	// overriding whatever the client sent.
+	agentSender := uploaderType == "agent" && uploaderID.Valid
+	initiatorAgentID := pgtype.UUID{}
+	var attr attribution.Result
+	if agentSender {
+		initiatorAgentID = uploaderID
+		initiatorUserID = pgtype.UUID{}
+		attr = attribution.AgentChatSend(s.agentChatSendFacts(ctx, session, senderTaskID))
+	} else {
+		attr = attribution.DirectHumanRun(initiatorUserID, attribution.EvidenceChat, session.ID)
+	}
 	attr, err := s.applyAttributionFallback(ctx, attr, agent)
 	if err != nil {
 		return nil, err
 	}
-	attrSource, _, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
+	attrSource, attrDelegatedFrom, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
 
 	var out DirectChatSendResult
 	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
@@ -1978,6 +2002,10 @@ func (s *TaskService) SendDirectChatMessage(
 			OriginatorSource:     attrSource,
 			TriggerEvidenceKind:  attrEvidenceKind,
 			TriggerEvidenceRefID: attrEvidenceRef,
+			// Jartan fork (SEC-2026-0079): the sending agent, and the run it
+			// sent from. NULL on a member send.
+			InitiatorAgentID:    initiatorAgentID,
+			DelegatedFromTaskID: attrDelegatedFrom,
 		})
 		if err != nil {
 			return fmt.Errorf("create direct chat task: %w", err)

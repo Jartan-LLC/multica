@@ -125,6 +125,9 @@ func (h *Handler) CreateAgentBuilderSession(w http.ResponseWriter, r *http.Reque
 		AgentID:     builder.ID,
 		CreatorID:   ownerUUID,
 		Title:       "Create an agent",
+		// Jartan fork (SEC-2026-0078): stamp the creating principal so an agent
+		// principal can still reach a session it opened. NULL for a human.
+		CreatorAgentID: h.chatActorScopeFor(r, userID, workspaceID).creatorAgentID(),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create agent builder session")
@@ -201,8 +204,17 @@ func (h *Handler) ListAgentBuilderSessions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Jartan fork (SEC-2026-0078): creator_id is the same value for every agent
+	// run in this workspace, so an agent principal listing here would otherwise
+	// get the owner's unfinished agent drafts. Same principal scope as the chat
+	// lists; a member's view is unchanged.
+	scope := h.chatActorScopeFor(r, userID, workspaceID)
+
 	sessions := make([]AgentBuilderSessionSummary, 0, len(rows))
 	for _, row := range rows {
+		if !scope.allows(row.AgentID, row.CreatorAgentID) {
+			continue
+		}
 		sessions = append(sessions, AgentBuilderSessionSummary{
 			SessionID:          uuidToString(row.ID),
 			Title:              row.Title,

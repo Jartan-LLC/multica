@@ -1,10 +1,22 @@
 # Jartan fork of Multica
 
 This is Jartan LLC's fork of [`multica-ai/multica`](https://github.com/multica-ai/multica).
-It exists to carry one patch: a **permission gate on agent-definition writes**.
-Everything else tracks upstream.
+It carries security patches against upstream behaviour that Jartan cannot fix
+from outside the code. Everything else tracks upstream.
 
-Read this before rebasing, deploying, or extending the patch.
+| Patch | Finding | Section |
+|---|---|---|
+| Permission gate on agent-definition writes | `SEC-2026-0069` (High) | [Why the fork exists](#why-the-fork-exists) |
+| Chat-session access scoped to the calling agent | `SEC-2026-0078` (High) | [The chat-surface patches](#the-chat-surface-patches) |
+| The sending agent recorded on chat-initiated runs | `SEC-2026-0079` (High) | [The chat-surface patches](#the-chat-surface-patches) |
+
+All three fall out of one root: **an agent run's token carries its owning
+human's identity**. `resolveActor` can tell an agent principal from a member
+server-side and unspoofably, and each patch applies that distinction to one
+surface that was missing it. The root itself — the runtime drawing no per-run
+identity boundary — is `SEC-2026-0075` and is not fixed here.
+
+Read this before rebasing, deploying, or extending any of them.
 
 ## Why the fork exists
 
@@ -34,7 +46,7 @@ rest of the agent-record mutation surface.
 Tracked as `SEC-2026-0069` (High) on Jartan's security register; the build is
 JAR-577, the spec and rulings are on JAR-571.
 
-## What the patch does
+## What the agent-definition gate does
 
 The governing access model is Thorne's amendment on JAR-571, comment
 `0b3ad55b` (2026-08-18), which supersedes the original ruling `83bcdfb0`
@@ -146,7 +158,106 @@ Two more limits worth naming, because neither is closed by this patch:
   idempotent bootstrap of the workspace's single built-in Chief-of-Staff seat,
   keyed on `system_key`, and it is not a general create path.
 
-## Where the patch lives
+## The chat-surface patches
+
+Two findings, one file, one root — the same "every agent authenticates as the
+owner" that the gate above exists for, on the chat API instead of the agent
+record. Registered on JAR-613, built on JAR-616. Both are upstream design; the
+fork introduced neither.
+
+### `SEC-2026-0078` — chat authorisation keyed on the token owner
+
+Upstream authorises every chat surface on the session's creator:
+`loadChatSessionForUser` admits when `chat_session.creator_id` equals the
+request's `X-User-ID`, and the list endpoints select `WHERE creator_id = $2`.
+The auth middleware stamps an `mat_` token's `X-User-ID` with the token row's
+owning human, so thirty seats and the owner resolve to one id and the creator
+predicate separates nobody from anybody. Demonstrated, not inferred: from inside
+an ordinary run, `GET /api/chat/sessions?status=all` returned every chat session
+in the workspace — the owner's private conversations included, with message
+content — and `GET /api/chat/sessions/{id}/messages` returned their transcripts.
+
+The patch scopes chat authorisation by **principal**. For a task-token request a
+session is reachable on exactly two openings:
+
+- the session's **pinned** agent (`chat_session.agent_id`) — its own
+  conversation, whose transcript its runs are handed anyway; and
+- the session's **creating** agent (`chat_session.creator_agent_id`, migration
+  901) — an agent that opened a session to talk to another agent must be able to
+  read the reply.
+
+Everything else is denied. **Member requests are untouched**: the creator check
+remains their whole rule.
+
+The rule lives in `chatActorScope` (`chat_actor_gate.go`), applied at
+`loadChatSessionForUser` — the single choke point every per-session chat handler
+funnels through, including the file-upload and agent-builder paths — and at each
+list endpoint, which cannot use that choke point because they never load a
+session. The scope's **zero value is a member scope**, so a call site that
+forgets to build one falls back to upstream behaviour rather than locking
+members out of their own chats.
+
+`creator_agent_id` is NULL for every pre-existing row and every row the web UI
+writes, which is correct: those sessions were created by a human. There is no
+backfill and none is possible.
+
+### `SEC-2026-0079` — an agent's chat send recorded as the owner's own action
+
+The sending principal was resolved on the way in and then dropped.
+`SendChatMessage` resolves `("agent", id)`, and `SendDirectChatMessage` then
+stamped `attribution.DirectHumanRun(<owner>, …)` — source `direct_human`, "a
+member's own action enqueued the run", which the attribution package classifies
+as compliance-grade precise. At claim, `initiator_type` was set to `"member"`
+wherever the row carried an `initiator_user_id`, and the daemon rendered "This
+task was initiated by **\<owner\>** (…), a member of this workspace" into the one
+prompt block that exists to answer "who am I answering".
+
+The record did not omit the sender. It asserted a false one, and told the
+recipient the same thing.
+
+The patch records the sending principal and stops the false claim:
+
+- `agent_task_queue.initiator_agent_id` (migration 902) carries the sending
+  agent; `initiator_user_id` is left NULL, because no human sent it.
+- Attribution becomes a **delegation** off the sending task
+  (`attribution.AgentChatSend`), with the accountable human copied from that task
+  rather than chained, and `delegated_from_task_id` making the hop traceable to a
+  real run. A send whose sending run resolves no human lands `unattributed` (then
+  the workspace's own fallback policy), never `direct_human`.
+- At claim the initiator renders through the **agent branch
+  `BuildTaskInitiatorBlock` already had** — "initiated by X, another agent in
+  this workspace". No new prompt text was written for this.
+
+Both values are server-verified, not caller-asserted: the auth middleware forces
+`X-Agent-ID` and `X-Task-ID` from the token row, overriding whatever the client
+sent.
+
+### What these two deliberately do not do
+
+- **No web UI**, as with the gate — enforcement is at the API.
+- **They do not fix the root** (`SEC-2026-0075`). A process holding a *human's*
+  credential authenticates as that human and neither patch applies to it, by
+  design — the same residual the gate carries.
+- **They do not add sender identity to the message body.** The recipient learns
+  the sender from `## Task Initiator`, which is server-written; nothing in the
+  message text is trusted for it.
+- **`SEC-2026-0078` does not restrict what a session's pinned agent may read.**
+  That agent already receives the transcript through its own runs; denying the
+  API while the daemon delivers the same bytes would be theatre.
+
+### Consequences a reader should know
+
+- **An agent-to-agent chat channel must create its own session.** Reaching a
+  session opened by someone else now fails, so the pattern is: the sender creates
+  the session (stamped `creator_agent_id`), sends, and polls it. Both ends stay
+  reachable — the sender as creator, the recipient as pinned agent.
+- **`HasPendingChatTasks` answers an agent principal off the list query**, not
+  the `EXISTS` fast path, which cannot express the principal rule without
+  changing an upstream query's shape. Members keep the fast path.
+- **The refusal is a 404, not a 403**, so probing session ids from a run tells
+  the caller nothing about which sessions exist.
+
+## Where the patches live
 
 | Path | What it is |
 |---|---|
@@ -159,6 +270,24 @@ Two more limits worth naming, because neither is closed by this patch:
 | `server/cmd/server/router.go` | the two additive routes |
 | `server/pkg/db/queries/workspace_delete.sql` | allow-list rows go with the workspace |
 | `server/internal/handler/agent_definition_gate_test.go` | the tests, written against AC1–AC5 and the amendment's §2/§3/§4 |
+
+The chat-surface patches (`SEC-2026-0078`, `SEC-2026-0079`):
+
+| Path | What it is |
+|---|---|
+| `server/migrations/901_chat_session_creator_agent.{up,down}.sql` | `chat_session.creator_agent_id` |
+| `server/migrations/903_chat_session_creator_agent_index.{up,down}.sql` | its index, built concurrently in its own file |
+| `server/migrations/902_task_initiator_agent.{up,down}.sql` | `agent_task_queue.initiator_agent_id` |
+| `server/internal/handler/chat_actor_gate.go` | `chatActorScope` — the whole reachability rule, in one file |
+| `server/internal/handler/chat.go` | the scope at `loadChatSessionForUser`, the two list branches, the pending-task endpoints; the create stamp; the sending task id on send |
+| `server/internal/handler/agent_builder.go` | the same scope on the builder-session list, and the create stamp |
+| `server/internal/attribution/agent_chat_send.go` | `AgentChatSend` — delegation attribution for an agent-sent message |
+| `server/internal/service/agent_chat_send.go` | the DB read that gathers its facts, kept out of the pure package |
+| `server/internal/service/task.go` | `SendDirectChatMessage`: agent-sender branch, `initiator_agent_id`, no `direct_human` |
+| `server/internal/handler/daemon.go` | claim renders the agent initiator through the branch that already existed |
+| `server/pkg/db/queries/chat.sql` | the three columns on their statements (+ generated code) |
+| `server/cmd/migrate/main.go` | the concurrent-index cleanup hook for 903 |
+| `server/internal/handler/chat_actor_gate_test.go`, `chat_sender_attribution_test.go` | the tests, written against Thorne's two closure conditions on JAR-616 |
 
 Fork-only migrations use the **900+ prefix band**, never the next sequential
 number, so a rebase never collides with an upstream migration that took the same
@@ -195,10 +324,12 @@ opening a hole.
 ```bash
 git remote add upstream https://github.com/multica-ai/multica.git   # once
 git fetch upstream && git rebase upstream/main
-cd server && go build ./... && go test ./internal/handler/ -run AgentDefinition
+cd server && go build ./... \
+  && go test ./internal/handler/ -run 'AgentDefinition|ChatActorGate|ChatSenderAttribution' \
+  && go test ./cmd/migrate/
 ```
 
-Check after every rebase:
+Check after every rebase — the gate:
 
 - `canManageAgent` still calls `authorizeAgentDefinitionWrite`, and still first.
 - New `/api/agents` mutation routes go through `canManageAgent`; if one does
@@ -213,6 +344,27 @@ Check after every rebase:
   behaviour config a listed seat should hold.
 - The `agent_definition_writer` row in `workspaceDeletionManifest` still matches
   the schema (upstream's own drift test will fail loudly if it does not).
+
+And the chat-surface patches:
+
+- `loadChatSessionForUser` still calls `chatActorScopeFor`, and still after the
+  creator check. It is the choke point; a per-session chat handler added upstream
+  inherits the rule through it.
+- A **list** endpoint added upstream over `chat_session` does NOT inherit
+  anything — it never loads a session. Any new `WHERE creator_id = ...` query
+  needs `scope.allows(...)` applied to its rows, exactly as the four existing
+  ones do.
+- `CreateChatSession` (both call sites) still stamps `creator_agent_id` from the
+  resolved actor, never from the request body.
+- `SendDirectChatMessage` still branches on `agentSender` before building
+  attribution, and still passes `initiator_agent_id` + `delegated_from_task_id`
+  to `CreateChatTask`. An upstream rewrite of that function's attribution is the
+  most likely place for `direct_human` to come back.
+- The claim handler still checks `task.InitiatorAgentID` **before**
+  `task.InitiatorUserID`. Reversing the order restores the false member claim
+  without failing to compile.
+- Migration 903 still has its entry in `concurrentIndexCleanups`; upstream's own
+  test fails loudly if it does not.
 
 ## Deploying
 

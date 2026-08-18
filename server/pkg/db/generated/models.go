@@ -179,6 +179,8 @@ type AgentTaskQueue struct {
 	RegenerateQuickActionsFor pgtype.UUID `json:"regenerate_quick_actions_for"`
 	PluginExecutionManifestID pgtype.UUID `json:"plugin_execution_manifest_id"`
 	BranchName                pgtype.Text `json:"branch_name"`
+	// The agent that sent the chat message which enqueued this run, or NULL when no agent did (Jartan fork, SEC-2026-0079). Server-verified: written from the mat_ task token the auth middleware bound to the request, never from caller-supplied input. Read at claim to render the initiator as an agent instead of as the token's owning human. Not a foreign key — the relationship is maintained in the application layer.
+	InitiatorAgentID pgtype.UUID `json:"initiator_agent_id"`
 }
 
 type AgentToLabel struct {
@@ -439,6 +441,8 @@ type ChatSession struct {
 	IsAgentIntro bool               `json:"is_agent_intro"`
 	PinnedAt     pgtype.Timestamptz `json:"pinned_at"`
 	ProjectID    pgtype.UUID        `json:"project_id"`
+	// The agent whose run created this session, or NULL when a human created it (Jartan fork, SEC-2026-0078). Read by the chat actor gate: a task-token request reaches a session only when the calling agent is the session's agent_id or its creator_agent_id. Not a foreign key — the relationship is maintained in the application layer.
+	CreatorAgentID pgtype.UUID `json:"creator_agent_id"`
 }
 
 type ClientUsageDaily struct {

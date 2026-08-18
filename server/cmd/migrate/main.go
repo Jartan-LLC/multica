@@ -194,6 +194,11 @@ var concurrentIndexCleanups = map[string]string{
 	"333_issue_status_pkey_index":                               "issue_status_pkey_uidx",
 	"335_issue_status_workspace_key_index":                      "idx_issue_status_workspace_key",
 	"336_issue_status_workspace_name_index":                     "idx_issue_status_workspace_name_active",
+
+	// Jartan fork (SEC-2026-0078). Registered here for the same reason as every
+	// entry above: an interrupted concurrent build leaves an INVALID index that
+	// `IF NOT EXISTS` would then record as success.
+	"903_chat_session_creator_agent_index": "idx_chat_session_creator_agent",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction
