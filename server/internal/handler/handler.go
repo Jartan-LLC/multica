@@ -868,6 +868,24 @@ func (h *Handler) requireWorkspaceRole(w http.ResponseWriter, r *http.Request, w
 	return member, true
 }
 
+// requireWorkspaceAdminRole is requireWorkspaceRole's actor-aware sibling for
+// true owner/admin-only gates, where a machine credential must never pass on
+// the strength of the token-owning human's role. Do not call this with
+// "member" in roles — requireWorkspaceRole remains the right call there: a
+// machine credential legitimately reaches resources it owns once membership
+// is established (e.g. canManageAgent's isAgentOwner branch).
+func (h *Handler) requireWorkspaceAdminRole(w http.ResponseWriter, r *http.Request, workspaceID, notFoundMsg string, roles ...string) (db.Member, bool) {
+	member, ok := h.requireWorkspaceMember(w, r, workspaceID, notFoundMsg)
+	if !ok {
+		return db.Member{}, false
+	}
+	if !actorHasWorkspaceRole(r, member.Role, roles...) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return db.Member{}, false
+	}
+	return member, true
+}
+
 // isWorkspaceEntity checks whether a user_id belongs to the given workspace,
 // as either a member or an agent depending on userType.
 func (h *Handler) isWorkspaceEntity(ctx context.Context, userType, userID, workspaceID string) bool {

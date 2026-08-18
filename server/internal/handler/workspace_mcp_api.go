@@ -355,7 +355,12 @@ func (h *Handler) requireAgentMcpWriter(w http.ResponseWriter, r *http.Request) 
 		return db.Agent{}, false
 	}
 	workspaceID := uuidToString(agent.WorkspaceID)
-	if actorType, _ := h.resolveActor(r, requestUserID(r), workspaceID); actorType == "agent" {
+	// actorType == "agent" alone misses a cloud_pat (mcn_) actor: resolveActor
+	// only fast-paths mat_ task tokens, and the cloud_pat auth branch never
+	// sets X-Agent-ID/X-Task-ID, so it falls back to "member" without them.
+	// isMachineCredentialActor reads the server-set X-Actor-Source directly
+	// and catches both.
+	if actorType, _ := h.resolveActor(r, requestUserID(r), workspaceID); actorType == "agent" || isMachineCredentialActor(r) {
 		writeError(w, http.StatusForbidden, "agents cannot modify MCP server assignments")
 		return db.Agent{}, false
 	}

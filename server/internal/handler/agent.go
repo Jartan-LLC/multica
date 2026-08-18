@@ -1610,7 +1610,7 @@ func (h *Handler) canManageAgent(w http.ResponseWriter, r *http.Request, agent d
 	if !ok {
 		return false
 	}
-	isAdmin := roleAllowed(member.Role, "owner", "admin")
+	isAdmin := actorHasWorkspaceRole(r, member.Role, "owner", "admin")
 	isAgentOwner := uuidToString(agent.OwnerID) == requestUserID(r)
 	if !isAdmin && !isAgentOwner {
 		writeError(w, http.StatusForbidden, "only the agent owner can manage this agent")

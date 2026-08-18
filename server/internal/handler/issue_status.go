@@ -124,7 +124,7 @@ func (h *Handler) CreateIssueStatus(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !ok {
+	if _, ok := h.requireWorkspaceAdminRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !ok {
 		return
 	}
 
@@ -350,7 +350,7 @@ func (h *Handler) loadIssueStatusForAdmin(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return db.IssueStatus{}, pgtype.UUID{}, false
 	}
-	if _, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !ok {
+	if _, ok := h.requireWorkspaceAdminRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !ok {
 		return db.IssueStatus{}, pgtype.UUID{}, false
 	}
 	idUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "issue status id")

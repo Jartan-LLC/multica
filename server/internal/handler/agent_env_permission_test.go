@@ -254,3 +254,43 @@ func TestAgentEnv_AgentActorRejectedForOwnedAgent(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentEnv_CloudPatActorRejected is the cloud-node half of the
+// case above: a cloud_pat request never carries X-Agent-ID/X-Task-ID, so
+// resolveActor falls back to "member" and the actorType == "agent" guard
+// alone does not catch it. authorizeAgentEnv must deny it on
+// isMachineCredentialActor regardless. ownerUserID is both the target
+// agent's owner and (via agentEnvOwnerFixture) a workspace member, so
+// before the fix this request would have reached canManageAgentEnv and
+// been let through on the owner check.
+func TestAgentEnv_CloudPatActorRejected(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	targetID, ownerUserID := agentEnvOwnerFixture(t, "env-cloudpat-target-agent", "env-cloudpat-owner@multica.test")
+
+	cases := []struct {
+		name string
+		fn   func(http.ResponseWriter, *http.Request)
+		body any
+	}{
+		{"reveal", testHandler.GetAgentEnv, nil},
+		{"update", testHandler.UpdateAgentEnv, map[string]any{"custom_env": map[string]string{"API_KEY": "exfiltrated"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			method := http.MethodGet
+			if tc.body != nil {
+				method = http.MethodPut
+			}
+			req := withURLParam(newRequestAs(ownerUserID, method, "/api/agents/"+targetID+"/env", tc.body), "id", targetID)
+			req.Header.Set("X-Actor-Source", "cloud_pat")
+			w := httptest.NewRecorder()
+			tc.fn(w, req)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 from a cloud_pat actor, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}

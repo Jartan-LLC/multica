@@ -245,6 +245,19 @@ func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []str
 			}
 
 			if len(roles) > 0 {
+				// A machine credential (mat_ task token, mcn_ cloud-node PAT)
+				// carries no workspace role: X-User-ID above is the OWNING
+				// human's id, so member.Role is the owner's role, not the
+				// caller's. Every RequireWorkspaceRole(FromURL) group is an
+				// admin/owner-only gate, so deny the machine actor outright
+				// rather than let it inherit the human's role. Mirrors
+				// handler.isMachineCredentialActor; duplicated here (not
+				// imported) because handler already imports middleware.
+				actorSource := r.Header.Get("X-Actor-Source")
+				if actorSource == "task_token" || actorSource == "cloud_pat" {
+					writeError(w, http.StatusForbidden, "insufficient permissions")
+					return
+				}
 				allowed := false
 				for _, role := range roles {
 					if member.Role == role {

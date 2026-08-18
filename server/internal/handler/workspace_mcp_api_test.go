@@ -419,3 +419,32 @@ func TestAgentMcpServerBinding_ResponseIsSecretFreeAndAgentActorsCannotWrite(t *
 		t.Fatalf("expected 403 for an agent actor, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// TestAgentMcpServerBinding_CloudPatActorCannotWrite is the cloud-node
+// mcn_ half: a cloud_pat request never carries X-Agent-ID/X-Task-ID (the
+// cloud_pat auth branches in auth.go / daemon_auth.go don't set them), so
+// resolveActor falls back to "member" for it and the actorType == "agent"
+// guard alone does not catch it. requireAgentMcpWriter must deny it anyway.
+// testUserID (the request's X-User-ID via newRequest) is the workspace
+// owner, so before the fix canViewAgentSecrets would have let this through
+// on the strength of that role.
+func TestAgentMcpServerBinding_CloudPatActorCannotWrite(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	serverID := createWorkspaceMcpServerForTest(t, "linear", workspaceMcpTestEntry)
+	agentID := createHandlerTestAgent(t, "ws-mcp-cloudpat-agent", nil)
+
+	req := newRequest(http.MethodPost, "/api/agents/"+agentID+"/mcp-servers",
+		map[string]any{"server_id": serverID})
+	req = withURLParam(req, "id", agentID)
+	req.Header.Set("X-Actor-Source", "cloud_pat")
+	w := httptest.NewRecorder()
+	testHandler.AddAgentMcpServer(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for a cloud_pat actor, got %d: %s", w.Code, w.Body.String())
+	}
+	if servers := listAgentMcpServersForTest(t, agentID); len(servers) != 0 {
+		t.Fatalf("expected no binding created by the denied write, got %+v", servers)
+	}
+}

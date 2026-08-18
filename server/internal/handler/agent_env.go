@@ -86,9 +86,14 @@ func (h *Handler) authorizeAgentEnv(w http.ResponseWriter, r *http.Request) (db.
 	// Reject agent actors before anything else. resolveActor returns
 	// "agent" iff both X-Agent-ID and a valid X-Task-ID are present and
 	// the task belongs to that agent — so this guard is precise and
-	// cannot be tricked by a member-supplied header.
+	// cannot be tricked by a member-supplied header. It alone is not
+	// sufficient: a cloud_pat (mcn_) request never carries those headers,
+	// so resolveActor falls back to "member" for it. isMachineCredentialActor
+	// reads the server-set X-Actor-Source instead, catching both mat_ and
+	// mcn_ regardless of what X-Agent-ID/X-Task-ID the caller did or didn't
+	// send.
 	actorType, _ := h.resolveActor(r, userID, workspaceID)
-	if actorType == "agent" {
+	if actorType == "agent" || isMachineCredentialActor(r) {
 		writeError(w, http.StatusForbidden, "agents may not access env management endpoints")
 		return db.Agent{}, db.Member{}, false
 	}

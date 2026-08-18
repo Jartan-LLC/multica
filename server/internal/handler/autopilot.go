@@ -414,6 +414,7 @@ func (h *Handler) ListAutopilots(w http.ResponseWriter, r *http.Request) {
 	// costs no per-row query. A missing member (shouldn't happen behind the
 	// workspace-member middleware) just yields can_write=false everywhere.
 	caller, callerErr := h.getWorkspaceMember(r.Context(), requestUserID(r), workspaceID)
+	isMachineActor := isMachineCredentialActor(r)
 	collabSet := map[string]struct{}{}
 	if callerErr == nil {
 		if ids, err := h.Queries.ListAutopilotIDsForCollaborator(r.Context(), caller.UserID); err == nil {
@@ -438,7 +439,7 @@ func (h *Handler) ListAutopilots(w http.ResponseWriter, r *http.Request) {
 		}
 		if callerErr == nil {
 			_, isCollaborator := collabSet[uuidToString(row.Autopilot.ID)]
-			cw := autopilotWriteByOwnership(row.Autopilot, caller) || isCollaborator
+			cw := autopilotWriteByOwnership(row.Autopilot, caller, isMachineActor) || isCollaborator
 			r.CanWrite = &cw
 		}
 		resp[i] = r
@@ -472,10 +473,11 @@ func (h *Handler) GetAutopilot(w http.ResponseWriter, r *http.Request) {
 	canWrite := false
 	canManageAccess := false
 	if member, err := h.getWorkspaceMember(r.Context(), requestUserID(r), workspaceID); err == nil {
-		canWrite = h.memberCanWriteAutopilot(r.Context(), autopilot, member)
+		isMachineActor := isMachineCredentialActor(r)
+		canWrite = h.memberCanWriteAutopilot(r.Context(), autopilot, member, isMachineActor)
 		// Managing the access list is narrower than write: collaborators can
 		// write but cannot re-grant (MUL-3807).
-		canManageAccess = autopilotWriteByOwnership(autopilot, member)
+		canManageAccess = autopilotWriteByOwnership(autopilot, member, isMachineActor)
 	}
 	resp.CanWrite = &canWrite
 	resp.CanManageAccess = &canManageAccess
@@ -539,8 +541,15 @@ func (h *Handler) loadAutopilotInWorkspace(w http.ResponseWriter, r *http.Reques
 // predicate: the autopilot's creator and workspace owners/admins always have
 // write access. Explicit collaborator grants (memberCanWriteAutopilot) layer
 // on top of this (MUL-3807).
-func autopilotWriteByOwnership(ap db.Autopilot, member db.Member) bool {
-	if roleAllowed(member.Role, "owner", "admin") {
+//
+// It is a pure predicate (no *http.Request in hand at every call site), so
+// callers pass isMachineActor rather than a request: a machine credential
+// never gets the owner/admin branch, since member.Role there is the
+// token-owning human's role, not the caller's. The creator-ownership branch
+// is untouched — it keys on the human who created the autopilot, which a
+// machine credential legitimately inherits (MUL-2600).
+func autopilotWriteByOwnership(ap db.Autopilot, member db.Member, isMachineActor bool) bool {
+	if !isMachineActor && roleAllowed(member.Role, "owner", "admin") {
 		return true
 	}
 	return ap.CreatedByType == "member" && uuidToString(ap.CreatedByID) == uuidToString(member.UserID)
@@ -553,8 +562,8 @@ func autopilotWriteByOwnership(ap db.Autopilot, member db.Member) bool {
 // owners/admins, and by members explicitly granted as collaborators. The same
 // predicate also gates whether webhook secrets are exposed on the read path,
 // since seeing a webhook token is equivalent to being able to trigger.
-func (h *Handler) memberCanWriteAutopilot(ctx context.Context, ap db.Autopilot, member db.Member) bool {
-	if autopilotWriteByOwnership(ap, member) {
+func (h *Handler) memberCanWriteAutopilot(ctx context.Context, ap db.Autopilot, member db.Member, isMachineActor bool) bool {
+	if autopilotWriteByOwnership(ap, member, isMachineActor) {
 		return true
 	}
 	granted, err := h.Queries.IsAutopilotCollaborator(ctx, db.IsAutopilotCollaboratorParams{
@@ -573,7 +582,7 @@ func (h *Handler) requireAutopilotWrite(w http.ResponseWriter, r *http.Request, 
 	if !ok {
 		return false
 	}
-	if !h.memberCanWriteAutopilot(r.Context(), ap, member) {
+	if !h.memberCanWriteAutopilot(r.Context(), ap, member, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "only the autopilot creator, a workspace admin, or a granted collaborator can manage this autopilot")
 		return false
 	}
@@ -592,7 +601,7 @@ func (h *Handler) requireAutopilotAccessManagement(w http.ResponseWriter, r *htt
 	if !ok {
 		return false
 	}
-	if !autopilotWriteByOwnership(ap, member) {
+	if !autopilotWriteByOwnership(ap, member, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "only the autopilot creator or a workspace admin can manage access")
 		return false
 	}

@@ -160,7 +160,7 @@ func (h *Handler) RevokeLarkInstallation(w http.ResponseWriter, r *http.Request)
 		WorkspaceID: wsUUID,
 	})
 	if agentErr != nil {
-		if _, ok := h.requireWorkspaceRole(w, r, uuidToString(wsUUID), "lark installation not found", "owner", "admin"); !ok {
+		if _, ok := h.requireWorkspaceAdminRole(w, r, uuidToString(wsUUID), "lark installation not found", "owner", "admin"); !ok {
 			return
 		}
 	} else if !h.canManageAgent(w, r, agent, agentDefinitionScopeClosed) {
@@ -416,7 +416,7 @@ func (h *Handler) GetLarkInstallStatus(w http.ResponseWriter, r *http.Request) {
 	// consistent with the cross-workspace case above.
 	if uuidToString(state.InitiatorID) != userID {
 		member, mErr := h.getWorkspaceMember(r.Context(), userID, uuidToString(wsUUID))
-		if mErr != nil || !roleAllowed(member.Role, "owner", "admin") {
+		if mErr != nil || !actorHasWorkspaceRole(r, member.Role, "owner", "admin") {
 			writeError(w, http.StatusNotFound, "install session not found")
 			return
 		}

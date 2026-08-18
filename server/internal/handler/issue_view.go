@@ -319,7 +319,7 @@ func (h *Handler) canManageIssueView(r *http.Request, view db.IssueView, userID 
 	if err != nil {
 		return false
 	}
-	return roleAllowed(member.Role, "owner", "admin")
+	return actorHasWorkspaceRole(r, member.Role, "owner", "admin")
 }
 
 type UpdateIssueViewRequest struct {

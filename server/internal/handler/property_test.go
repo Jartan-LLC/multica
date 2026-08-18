@@ -244,6 +244,22 @@ func TestPropertyAdminGate(t *testing.T) {
 	}
 }
 
+// TestPropertyAdminGate_CloudPatActorRejected is the cloud-node half
+// of TestPropertyAdminGate: a cloud_pat request never carries X-Agent-ID,
+// so resolveActor falls back to "member" for it and the actorType ==
+// "agent" check above does not catch it. requirePropertyAdmin's role gate
+// (now requireWorkspaceAdminRole) must deny it anyway — the fixture user is
+// the workspace owner, so before the fix this request would have passed.
+func TestPropertyAdminGate_CloudPatActorRejected(t *testing.T) {
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/properties", map[string]any{"name": "CloudPatMade", "type": "text"})
+	req.Header.Set("X-Actor-Source", "cloud_pat")
+	testHandler.CreateProperty(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cloud_pat CreateProperty: expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestIssuePropertyValues(t *testing.T) {
 	sel := createTestProperty(t, map[string]any{
 		"name": "Env" + uuid.NewString()[:8], "type": "select",

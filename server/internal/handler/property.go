@@ -635,7 +635,11 @@ func (h *Handler) requirePropertyAdmin(w http.ResponseWriter, r *http.Request) (
 		writeError(w, http.StatusForbidden, "agents cannot manage property definitions")
 		return "", "", false
 	}
-	if _, roleOK := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !roleOK {
+	// requireWorkspaceAdminRole (not requireWorkspaceRole) so a cloud_pat
+	// (mcn_) actor — which the resolveActor check above does not catch,
+	// since it never carries X-Agent-ID/X-Task-ID — is still denied by the
+	// role gate itself.
+	if _, roleOK := h.requireWorkspaceAdminRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !roleOK {
 		return "", "", false
 	}
 	return workspaceID, userID, true

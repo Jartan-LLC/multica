@@ -408,7 +408,7 @@ func (h *Handler) canManageSkill(w http.ResponseWriter, r *http.Request, skill d
 	if !ok {
 		return false
 	}
-	isAdmin := roleAllowed(member.Role, "owner", "admin")
+	isAdmin := actorHasWorkspaceRole(r, member.Role, "owner", "admin")
 	isSkillCreator := skill.CreatedBy.Valid && uuidToString(skill.CreatedBy) == requestUserID(r)
 	if !isAdmin && !isSkillCreator {
 		writeError(w, http.StatusForbidden, "only the skill creator can manage this skill")

@@ -1130,7 +1130,7 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if requester.Role != "owner" {
+	if !actorHasWorkspaceRole(r, requester.Role, "owner") {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}

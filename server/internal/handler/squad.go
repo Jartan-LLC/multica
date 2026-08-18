@@ -115,8 +115,14 @@ func applySquadMemberSummary(resp *SquadResponse, summary *squadMemberSummary) {
 // visible workspace-wide (ListSquads is unfiltered). Mirrors the front-end
 // per-squad `canManage` gate so the UI and API agree on who can rename / add
 // members / archive (MUL-4223).
-func canManageSquad(member db.Member, squad db.Squad) bool {
-	if roleAllowed(member.Role, "owner", "admin") {
+//
+// Pure predicate (no *http.Request in hand at every call site): callers pass
+// isMachineActor rather than a request, so a machine credential never gets
+// the owner/admin branch — member.Role there is the token-owning human's
+// role, not the caller's. The creator branch is untouched: it keys on
+// authorship, which a machine credential legitimately inherits (MUL-2600).
+func canManageSquad(member db.Member, squad db.Squad, isMachineActor bool) bool {
+	if !isMachineActor && roleAllowed(member.Role, "owner", "admin") {
 		return true
 	}
 	return uuidToString(squad.CreatorID) == uuidToString(member.UserID)
@@ -131,8 +137,10 @@ func canManageSquad(member db.Member, squad db.Squad) bool {
 // members' private / non-allow-listed agents are rejected. This stops a
 // creator from smuggling an agent they cannot invoke into a squad and reaching
 // it through squad routing (MUL-4223).
-func (h *Handler) memberCanWireAgent(ctx context.Context, member db.Member, agent db.Agent, workspaceID string) bool {
-	if roleAllowed(member.Role, "owner", "admin") {
+//
+// isMachineActor: see canManageSquad.
+func (h *Handler) memberCanWireAgent(ctx context.Context, member db.Member, agent db.Agent, workspaceID string, isMachineActor bool) bool {
+	if !isMachineActor && roleAllowed(member.Role, "owner", "admin") {
 		return true
 	}
 	uid := uuidToString(member.UserID)
@@ -271,7 +279,7 @@ func (h *Handler) CreateSquad(w http.ResponseWriter, r *http.Request) {
 	}
 	// A non-admin creator may only lead their squad with an agent they can
 	// @-trigger; admins may wire any workspace agent (MUL-4223).
-	if !h.memberCanWireAgent(r.Context(), member, leaderAgent, workspaceID) {
+	if !h.memberCanWireAgent(r.Context(), member, leaderAgent, workspaceID, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "you can only use an agent you have access to as leader")
 		return
 	}
@@ -345,7 +353,7 @@ func (h *Handler) UpdateSquad(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !canManageSquad(member, squad) {
+	if !canManageSquad(member, squad, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
@@ -422,7 +430,7 @@ func (h *Handler) UpdateSquad(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// A non-admin creator may only promote an agent they can @-trigger.
-		if !h.memberCanWireAgent(r.Context(), member, newLeader, workspaceID) {
+		if !h.memberCanWireAgent(r.Context(), member, newLeader, workspaceID, isMachineCredentialActor(r)) {
 			writeError(w, http.StatusForbidden, "you can only use an agent you have access to as leader")
 			return
 		}
@@ -489,7 +497,7 @@ func (h *Handler) DeleteSquad(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !canManageSquad(member, squad) {
+	if !canManageSquad(member, squad, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
@@ -758,7 +766,7 @@ func (h *Handler) AddSquadMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !canManageSquad(member, squad) {
+	if !canManageSquad(member, squad, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
@@ -802,7 +810,7 @@ func (h *Handler) AddSquadMember(w http.ResponseWriter, r *http.Request) {
 		// A non-admin creator may only add agents they can @-trigger (public
 		// or their own / allow-listed agents); admins may add any workspace
 		// agent (MUL-4223).
-		if !h.memberCanWireAgent(r.Context(), member, agent, workspaceID) {
+		if !h.memberCanWireAgent(r.Context(), member, agent, workspaceID, isMachineCredentialActor(r)) {
 			writeError(w, http.StatusForbidden, "you can only add an agent you have access to")
 			return
 		}
@@ -847,7 +855,7 @@ func (h *Handler) RemoveSquadMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !canManageSquad(member, squad) {
+	if !canManageSquad(member, squad, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
@@ -903,7 +911,7 @@ func (h *Handler) UpdateSquadMemberRole(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if !canManageSquad(member, squad) {
+	if !canManageSquad(member, squad, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}

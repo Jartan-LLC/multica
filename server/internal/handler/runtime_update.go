@@ -226,7 +226,7 @@ func (h *Handler) InitiateUpdate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !canEditRuntime(member, rt) {
+	if !canEditRuntime(member, rt, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "only runtime owners and workspace admins can update runtimes")
 		return
 	}
@@ -300,7 +300,7 @@ func (h *Handler) GetUpdate(w http.ResponseWriter, r *http.Request) {
 	// Keep an in-flight poll alive if an admin is downgraded after starting
 	// the update. This exception is scoped to the immutable request initiator;
 	// other plain members still cannot read another runtime's update status.
-	if !canEditRuntime(member, rt) && update.InitiatorUserID != uuidToString(member.UserID) {
+	if !canEditRuntime(member, rt, isMachineCredentialActor(r)) && update.InitiatorUserID != uuidToString(member.UserID) {
 		writeError(w, http.StatusForbidden, "only runtime owners, workspace admins, and the update initiator can view this update")
 		return
 	}

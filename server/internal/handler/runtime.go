@@ -541,7 +541,7 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !canEditRuntime(member, rt) {
+	if !canEditRuntime(member, rt, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "you can only edit your own runtimes")
 		return
 	}
@@ -613,7 +613,7 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 			// owners/admins rename every runtime sharing the daemon_id. A NULL
 			// owner filter means "all runtimes on this machine".
 			var ownerFilter pgtype.UUID
-			if !roleAllowed(member.Role, "owner", "admin") {
+			if !actorHasWorkspaceRole(r, member.Role, "owner", "admin") {
 				ownerFilter = member.UserID
 			}
 			rows, err := h.Queries.UpdateAgentRuntimeCustomNameByDaemon(r.Context(), db.UpdateAgentRuntimeCustomNameByDaemonParams{
@@ -663,8 +663,12 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, runtimeToResponse(rt))
 }
 
-func canEditRuntime(member db.Member, rt db.AgentRuntime) bool {
-	if roleAllowed(member.Role, "owner", "admin") {
+// canEditRuntime is a pure predicate (no *http.Request in hand at every call
+// site), so callers pass isMachineActor rather than a request: a machine
+// credential never gets the owner/admin branch, since member.Role there is
+// the token-owning human's role, not the caller's.
+func canEditRuntime(member db.Member, rt db.AgentRuntime, isMachineActor bool) bool {
+	if !isMachineActor && roleAllowed(member.Role, "owner", "admin") {
 		return true
 	}
 	return rt.OwnerID.Valid && uuidToString(rt.OwnerID) == uuidToString(member.UserID)
@@ -932,7 +936,7 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Permission: owner/admin can delete any runtime; members can only delete their own.
-	if !canEditRuntime(member, rt) {
+	if !canEditRuntime(member, rt, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "you can only delete your own runtimes")
 		return
 	}
@@ -1142,7 +1146,7 @@ func (h *Handler) UnbindAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	if !canEditRuntime(member, rt) {
+	if !canEditRuntime(member, rt, isMachineCredentialActor(r)) {
 		writeError(w, http.StatusForbidden, "you can only delete your own runtimes")
 		return
 	}

@@ -471,7 +471,7 @@ func (h *Handler) loadReachableQuickAction(
 // requirePublicQuickActionRole gates writes that leave an action `public`.
 // Returns false having already written the error response.
 func (h *Handler) requirePublicQuickActionRole(w http.ResponseWriter, r *http.Request, workspaceID string) bool {
-	_, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin")
+	_, ok := h.requireWorkspaceAdminRole(w, r, workspaceID, "workspace not found", "owner", "admin")
 	return ok
 }
 

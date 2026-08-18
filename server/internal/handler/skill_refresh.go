@@ -135,7 +135,7 @@ func (h *Handler) RefreshSkill(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	isAdmin := roleAllowed(member.Role, "owner", "admin")
+	isAdmin := actorHasWorkspaceRole(r, member.Role, "owner", "admin")
 	isCreator := skill.CreatedBy.Valid && uuidToString(skill.CreatedBy) == userID
 	if !isAdmin && !isCreator {
 		writeError(w, http.StatusForbidden, "only the skill creator or a workspace admin can update this skill from its source")
